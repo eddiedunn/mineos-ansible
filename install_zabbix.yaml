@@ -1,0 +1,175 @@
+- name: Install Zabbix
+  hosts: all
+
+  vars:
+    listen_port: 443
+    db_user: zabbix
+    db_password: KFmN3U65oa8msn
+    db_name: zabbix
+    db_host: zabbix-test
+    db_domain: eddiedunn.com
+    db_hostname: "{{ db_host }}.{{ db_domain }}"
+    self_signed_key: /etc/ssl/private/server.key
+    self_signed_pem: /etc/ssl/private/server.pem
+    packages:
+        - postgresql
+        - postgresql-contrib
+        - python3-pip
+        - acl
+
+    python_packages:
+        - psycopg2-binary
+  tasks:
+
+    # - name: Set DNS record for hostname 
+    #   community.general.cloudflare_dns:
+    #     zone: eddiedunn.com
+    #     record: zabbix-test
+    #     type: A
+    #     value: "{{ ansible_default_ipv4.address }}"
+    #     api_token: "{{ cloudflare_api_key }}"
+
+
+    - name: Upgrade Ubuntu
+      ansible.builtin.import_tasks: update_ubuntu.yml   
+
+    - name: Install packages
+      apt: "name={{ item }} state=present"
+      loop: "{{ packages }}"
+
+    - name: Install Python packages
+      pip: "name={{ item }}  state=present"
+      loop:
+        - psycopg2-binary
+
+    - name: Find out if PostgreSQL is initialized
+      ansible.builtin.stat:
+        path: "/var/lib/pgsql/data/pg_hba.conf"
+      register: postgres_data
+
+    - name: Start and enable services
+      service: "name={{ item }} state=started enabled=yes"
+      with_items:
+        - postgresql
+
+
+    - name: Install deb for the repo
+      ansible.builtin.apt:
+        deb: https://repo.zabbix.com/zabbix/6.2/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.2-2%2Bubuntu22.04_all.deb
+
+    
+    - name: Install Zabbix server and agent
+      apt:
+        update_cache: yes
+        name:
+          - zabbix-server-pgsql
+          - zabbix-frontend-php
+          - php8.1-pgsql
+          - zabbix-nginx-conf
+          - zabbix-sql-scripts
+          - zabbix-agent
+        state: present
+
+
+    # echo "md5$(echo -n 'demopassword' | md5sum | awk '{print $1}')"
+    - name: Create zabbix user, set MD5-hashed password
+      become: true
+      become_user: postgres
+      postgresql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+
+    - name: Create zabbix database 
+      become: true
+      become_user: postgres
+      postgresql_db:
+        state: present
+        name: "{{ db_name }}"
+        encoding: UTF-8
+
+    - name: Grant db user access 
+      become: yes
+      become_user: postgres
+      postgresql_privs:
+        type: database
+        database: "{{ db_name }}"
+        roles: "{{ db_user }}"
+        grant_option: no
+        privs: all
+
+    - name: Allow md5 connection for the db user
+      become: yes
+      become_user: postgres
+      postgresql_pg_hba:
+        dest: "/etc/postgresql/14/main/pg_hba.conf"
+        contype: host
+        databases: all
+        method: md5
+        users: "{{ db_user }}"
+        create: yes
+
+      notify: restart and enable
+
+
+    - name: extract init script 
+      ansible.builtin.shell: zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz > /tmp/server.sql
+      args:
+        creates: /tmp/server.sql
+        executable: /bin/bash
+
+    - name: Execute zabbix init script 
+      ansible.builtin.shell: "cat /tmp/server.sql | sudo -u zabbix psql zabbix && touch /root/db_init_complete"
+      args:
+        creates: /root/db_init_complete
+        executable: /bin/bash
+
+    - name: Set DBPassword
+      ansible.builtin.shell: "echo 'DBPassword={{ db_password }}' >> /etc/zabbix/zabbix_server.conf && touch /root/db_password_set" 
+      args:
+        creates: /root/db_password_set
+        executable: /bin/bash
+
+    - name: Create private key (RSA, 4096 bits)
+      community.crypto.openssl_privatekey:
+        path: "{{ self_signed_key }}"
+
+
+    - name: Create simple self-signed certificate
+      community.crypto.x509_certificate:
+        path: "{{ self_signed_pem }}"
+        privatekey_path: "{{ self_signed_key }}"
+        provider: selfsigned
+
+    - name: Remove default nginx sites-enabled 
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Grab dh parameters
+      ansible.builtin.copy:
+        src: files/ssl-dhparams.pem
+        dest: /etc/zabbix/dhparam
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Place config file for nginx
+      template:
+        src: templates/zabbix_nginx_conf.j2
+        dest: /etc/zabbix/nginx.conf
+      notify: restart and enable
+
+
+
+  handlers:
+    - name: restart and enable
+      service: 
+        name: "{{ item }}" 
+        state: restarted 
+        enabled: yes 
+      with_items: 
+        - zabbix-server
+        - zabbix-agent
+        - nginx
+        - php8.1-fpm
+        - postgresql
