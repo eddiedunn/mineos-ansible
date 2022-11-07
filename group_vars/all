@@ -1,0 +1,3 @@
+mineos_password: DAS76jfxsXJ3
+ansible_become: yes
+ansible_user: admin

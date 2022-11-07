@@ -1,0 +1,6 @@
+roles/*
+collections/*
+.DS_Store
+log/*
+.python-version
+kp.pem

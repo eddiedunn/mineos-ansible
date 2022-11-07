@@ -1,0 +1,144 @@
+---
+- name: Install MineOS
+  hosts: all
+  vars:
+    install_dir: /usr/games/minecraft
+  tasks:
+
+    - name: Upgrade Ubuntu
+      ansible.builtin.import_tasks: update_ubuntu.yml   
+
+    # Changes pam auth algo to sha512 from yescrypt
+    # must change password on box manually 
+    - name: Add line to make hashing algortihm sha512
+      lineinfile:
+        path: /etc/pam.d/common-password
+        search_string: 'success=1'
+        line: "password        [success=1 default=ignore]      pam_unix.so obscure sha512"
+        state: present
+
+    - name: Install pre-reqs for nodejs
+      ansible.builtin.apt:
+        pkg:
+        - curl 
+        - dirmngr 
+        - apt-transport-https 
+        - lsb-release 
+        - ca-certificates
+        - git
+        - rdiff-backup
+        - screen
+        - rsync
+        - build-essential
+        - acl
+
+    - name: Install Node 14.X repo and update cache from nodesource
+      ansible.builtin.shell: 'curl -sL https://deb.nodesource.com/setup_14.x | sudo -E bash - && touch /root/node_setup_complete'
+      args:
+        creates: /root/node_setup_complete
+
+
+    - name: Install node 14.X
+      ansible.builtin.apt:
+        pkg:
+        - nodejs
+      
+    - name: Download Openjdk18
+      ansible.builtin.get_url:
+        url: https://download.java.net/java/GA/jdk18.0.2.1/db379da656dc47308e138f21b33976fa/1/GPL/openjdk-18.0.2.1_linux-x64_bin.tar.gz
+        dest: /root/openjdk-18.0.2.1_linux-x64_bin.tar.gz
+        mode: '0440'
+
+    - name: Extract openjdk-18 tar.gz
+      ansible.builtin.unarchive:
+        src: /root/openjdk-18.0.2.1_linux-x64_bin.tar.gz
+        dest: /opt
+        remote_src: yes
+
+    - name: correct java version selected
+      alternatives:
+        name: java
+        path: /opt/jdk-18.0.2.1/bin/java
+        link: /usr/bin/java
+
+    # must change password on box manually 
+    - name: Add user for webgui login
+      ansible.builtin.user:
+        name: webgui
+        password: "{{ mineos_password | password_hash('sha512') }}"
+        comment: webgui
+
+
+    - name: Git checkout
+      ansible.builtin.git:
+        repo: 'https://github.com/hexparrot/mineos-node'
+        dest: "{{ install_dir }}"
+        version: master
+        force: yes
+
+
+    - name: Set git config for filemode
+      community.general.git_config:
+        name: core.filemode
+        scope: system
+        value: false
+
+    - name: Set git config for safe repo
+      community.general.git_config:
+        name: safe.directory
+        scope: system
+        value: "{{ install_dir }}"
+
+    - name: make files executable
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: '0755'
+        state: touch
+      with_items:
+        - "{{ install_dir }}/generate-sslcert.sh"
+        - "{{ install_dir }}/mineos_console.js"
+        - "{{ install_dir }}/webui.js"
+
+    - name: copy Mineos main config file
+      ansible.builtin.copy:
+        src: files/mineos.conf 
+        dest: /etc/mineos.conf
+        mode: '0644'
+
+    - name: copy test-auth.js script
+      ansible.builtin.copy:
+        src: files/test-auth.js 
+        dest: "{{ install_dir }}"
+        mode: '0644'
+
+    - name: Install packages based on package.json.
+      community.general.npm:
+        path: "{{ install_dir }}"
+        unsafe_perm: yes
+        ci: yes
+
+
+    - name: Generate self-signed certs 
+      ansible.builtin.shell:
+        cmd: "{{ install_dir }}/generate-sslcert.sh && touch /root/cert_gen_complete"
+        creates: /root/cert_gen_complete
+
+    - name: copy systemd config file
+      ansible.builtin.copy:
+        src: files/mineos_systemd_conf
+        dest: /etc/systemd/system/mineos.service
+        mode: '0644'
+
+    - name: Enable service mineos and ensure it is not masked
+      ansible.builtin.systemd:
+        name: mineos
+        enabled: yes
+        masked: no
+        state: started
+
+
+    - name: Stop and Start ssh
+      service:
+        name: ssh
+        state: restarted
+
